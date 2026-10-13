@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.stream.Stream;
+import java.nio.file.StandardCopyOption;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.CrossOrigin;
@@ -22,6 +23,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.DeleteMapping;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -32,6 +34,16 @@ public class FileController {
 
     private final Path uploadDir =
             Paths.get("uploads").toAbsolutePath().normalize();
+
+    @GetMapping("/")
+    public ResponseEntity<Map<String, Object>> rootStatus() {
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("app", "FileFlix Cloud Storage Backend");
+        status.put("status", "ACTIVE");
+        status.put("frontend", "http://localhost:5173");
+        status.put("message", "Backend is connected to MySQL and running. Open the frontend URL in your browser to view the application UI.");
+        return ResponseEntity.ok(status);
+    }
 
     @GetMapping("/api/files")
     public List<String> getFiles() throws IOException {
@@ -142,6 +154,37 @@ public ResponseEntity<byte[]> previewFile(
 }
 
 
+@DeleteMapping("/api/folders/{folder}/files/{filename:.+}")
+public ResponseEntity<String> deleteFolderFile(
+        @PathVariable String folder,
+        @PathVariable String filename) {
+
+    try {
+        Path folderPath = uploadDir.resolve(folder).normalize();
+        Path filePath = folderPath.resolve(filename).normalize();
+
+        if (!folderPath.startsWith(uploadDir.normalize())
+                || !Files.isDirectory(folderPath)) {
+            return ResponseEntity.notFound().build();
+        }
+
+        if (!filePath.startsWith(folderPath)
+                || !Files.isRegularFile(filePath)) {
+            return ResponseEntity.notFound().build();
+        }
+
+        Files.delete(filePath);
+
+        return ResponseEntity.ok("File deleted successfully!");
+
+    } catch (IOException e) {
+        return ResponseEntity.internalServerError()
+                .body("Unable to delete file.");
+    }
+}
+
+
+
 @GetMapping("/api/folders/{folder}/files")
 public List<String> getFolderFiles(@PathVariable String folder)
         throws IOException {
@@ -165,6 +208,47 @@ public List<String> getFolderFiles(@PathVariable String folder)
                 .map(path -> path.getFileName().toString())
                 .sorted()
                 .toList();
+    }
+}
+
+
+@GetMapping("/api/folders/{folder}/preview/{filename:.+}")
+public ResponseEntity<?> previewFolderFile(
+        @PathVariable String folder,
+        @PathVariable String filename) {
+
+    try {
+        Path folderPath = uploadDir.resolve(folder).normalize();
+        Path filePath = folderPath.resolve(filename).normalize();
+
+        if (!folderPath.startsWith(uploadDir.normalize())
+                || !Files.isDirectory(folderPath)) {
+            return ResponseEntity.notFound().build();
+        }
+
+        if (!filePath.startsWith(folderPath)
+                || !Files.isRegularFile(filePath)) {
+            return ResponseEntity.notFound().build();
+        }
+
+        String contentType = Files.probeContentType(filePath);
+
+        if (contentType == null) {
+            contentType = "application/octet-stream";
+        }
+
+        return ResponseEntity.ok()
+                .contentType(
+                    org.springframework.http.MediaType.parseMediaType(contentType))
+                .header(
+                    org.springframework.http.HttpHeaders.CONTENT_DISPOSITION,
+                    "inline; filename=\"" + filePath.getFileName() + "\"")
+                .body(
+                    new org.springframework.core.io.FileSystemResource(filePath));
+
+    } catch (IOException e) {
+        return ResponseEntity.internalServerError()
+                .body("Unable to preview file.");
     }
 }
 
@@ -273,6 +357,94 @@ public String createFolder(@RequestParam("name") String name)
     return "Folder created successfully: " + folderName;
 }
 
+
+@PostMapping("/api/folders/{folder}/move/{filename:.+}")
+public ResponseEntity<Map<String, String>> moveFile(
+        @PathVariable String folder,
+        @PathVariable String filename,
+        @RequestParam String destination) {
+
+    Map<String, String> response = new LinkedHashMap<>();
+
+    try {
+        Path baseDir = uploadDir.toAbsolutePath().normalize();
+        Files.createDirectories(baseDir);
+
+        // Block path traversal in filename
+        if (filename == null || filename.isBlank()
+                || filename.contains("..") || filename.contains("/") || filename.contains("\\")) {
+            response.put("error", "Invalid filename.");
+            return ResponseEntity.badRequest().body(response);
+        }
+
+        // Resolve source directory: "main", "root", or "" maps to baseDir
+        Path sourceDir;
+        String cleanSource = folder == null ? "" : folder.trim();
+        if (cleanSource.equalsIgnoreCase("main") || cleanSource.equalsIgnoreCase("root") || cleanSource.isBlank()) {
+            sourceDir = baseDir;
+        } else {
+            if (!cleanSource.matches("[a-zA-Z0-9 _-]+")) {
+                response.put("error", "Invalid source folder name.");
+                return ResponseEntity.badRequest().body(response);
+            }
+            sourceDir = baseDir.resolve(cleanSource).normalize();
+        }
+
+        // Resolve destination directory: "main", "root", or "" maps to baseDir
+        Path targetDir;
+        String cleanDest = destination == null ? "" : destination.trim();
+        if (cleanDest.equalsIgnoreCase("main") || cleanDest.equalsIgnoreCase("root") || cleanDest.isBlank()) {
+            targetDir = baseDir;
+        } else {
+            if (!cleanDest.matches("[a-zA-Z0-9 _-]+")) {
+                response.put("error", "Invalid destination folder name.");
+                return ResponseEntity.badRequest().body(response);
+            }
+            targetDir = baseDir.resolve(cleanDest).normalize();
+        }
+
+        // Path traversal check
+        if (!sourceDir.startsWith(baseDir) || !targetDir.startsWith(baseDir)) {
+            response.put("error", "Access denied: Invalid folder path.");
+            return ResponseEntity.badRequest().body(response);
+        }
+
+        // Existence checks
+        if (!Files.exists(sourceDir) || !Files.isDirectory(sourceDir)) {
+            response.put("error", "Source folder not found: " + cleanSource);
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+        }
+
+        if (!Files.exists(targetDir) || !Files.isDirectory(targetDir)) {
+            response.put("error", "Destination folder not found: " + cleanDest);
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+        }
+
+        Path sourceFile = sourceDir.resolve(filename).normalize();
+        Path targetFile = targetDir.resolve(filename).normalize();
+
+        if (!sourceFile.startsWith(sourceDir) || !Files.exists(sourceFile) || !Files.isRegularFile(sourceFile)) {
+            response.put("error", "Source file not found: " + filename);
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+        }
+
+        if (Files.exists(targetFile)) {
+            response.put("error", "A file with this name already exists in destination folder.");
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+        }
+
+        Files.move(sourceFile, targetFile);
+
+        response.put("message", "File moved successfully!");
+        response.put("file", filename);
+        response.put("destination", cleanDest);
+        return ResponseEntity.ok(response);
+
+    } catch (IOException e) {
+        response.put("error", "Unable to move file: " + e.getMessage());
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+    }
+}
 
 
 }

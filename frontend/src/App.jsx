@@ -1,273 +1,477 @@
+// frontend/src/App.jsx
+// Main container component for FileFlix
 
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
+import "./App.css";
+
+import Header from "./components/Header";
+import FolderSidebar from "./components/FolderSidebar";
+import UploadPanel from "./components/UploadPanel";
+import FileList from "./components/FileList";
+import FolderIcon3D from "./components/FolderIcon3D";
+import CreateFolder from "./components/CreateFolder";
+import MoveFileModal from "./components/MoveFileModal";
+import FilePreview from "./components/FilePreview";
+import FileItem from "./components/FileItem";
+import { fileService } from "./services/fileService";
 
 function App() {
+  // Data state
   const [files, setFiles] = useState([]);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [message, setMessage] = useState("Loading files...");
-  const [uploading, setUploading] = useState(false);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [sortOrder, setSortOrder] = useState("asc");
   const [fileDetails, setFileDetails] = useState([]);
   const [folders, setFolders] = useState([]);
-const [selectedFolder, setSelectedFolder] = useState("");
+  const [folderFiles, setFolderFiles] = useState([]);
 
-  // Get the file list from Spring Boot
+  // Active selections
+  const [selectedFolder, setSelectedFolder] = useState("");
+  const [currentTab, setCurrentTab] = useState("dashboard"); // "dashboard", "myfiles", "activity", "trash"
+  const [folderSortOrder, setFolderSortOrder] = useState("asc");
+  const [searchTerm, setSearchTerm] = useState("");
 
-async function loadFiles() {
-  try {
-    const [filesResponse, detailsResponse] = await Promise.all([
-      fetch("http://localhost:8080/api/files"),
-      fetch("http://localhost:8080/api/files/details"),
-    ]);
+  // Modals & previews
+  const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
+  const [movingFile, setMovingFile] = useState(null); // { file, folder }
+  const [previewingFile, setPreviewingFile] = useState(null); // { file, url }
 
-    if (!filesResponse.ok || !detailsResponse.ok) {
-      throw new Error("Failed to load files");
+  // Status & notifications
+  const [toast, setToast] = useState(null); // { message, type: 'success' | 'error' }
+  const [uploading, setUploading] = useState(false);
+
+  const API = fileService.getApiBase();
+
+  // Helper to show notification toasts
+  const showToast = (message, type = "success") => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  };
+
+  // Load files from the main uploads folder
+  async function loadFiles() {
+    try {
+      const [filesData, detailsData] = await Promise.all([
+        fileService.getFiles(),
+        fileService.getFileDetails(),
+      ]);
+      setFiles(filesData);
+      setFileDetails(detailsData);
+    } catch (err) {
+      showToast("Unable to load files. Backend running?", "error");
     }
-
-    const filesData = await filesResponse.json();
-    const detailsData = await detailsResponse.json();
-
-    setFiles(filesData);
-    setFileDetails(detailsData);
-    setMessage("");
-  } catch (error) {
-    setMessage("Unable to load files. Check the backend.");
   }
-}
 
-
-async function loadFolders() {
-  try {
-    const response = await fetch(
-      "http://localhost:8080/api/folders"
-    );
-
-    if (!response.ok) {
-      throw new Error("Failed to load folders");
+  // Load available folders
+  async function loadFolders() {
+    try {
+      const foldersData = await fileService.getFolders();
+      setFolders(foldersData);
+    } catch (err) {
+      showToast("Unable to load folders. Backend running?", "error");
     }
-
-    const data = await response.json();
-    setFolders(data);
-  } catch (error) {
-    setMessage("Unable to load folders. Check the backend.");
   }
-}
 
-
-function formatFileSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
-useEffect(() => {
-  loadFiles();
-  loadFolders();
-}, []);
-
-  // Upload the selected file
-  async function handleUpload(event) {
-    event.preventDefault();
-
-    if (!selectedFile) {
-      setMessage("Please select a file first.");
+  // Load files in the selected folder
+  async function loadFolderFiles(folder) {
+    if (!folder) {
+      setFolderFiles([]);
       return;
     }
+    try {
+      const data = await fileService.getFolderFiles(folder);
+      setFolderFiles(data);
+    } catch (err) {
+      setFolderFiles([]);
+      showToast("Unable to load folder files.", "error");
+    }
+  }
 
+  // Initial load
+  useEffect(() => {
+    async function init() {
+      await Promise.all([loadFiles(), loadFolders()]);
+    }
+    init();
+  }, []);
+
+  // When selectedFolder changes, load its files
+  useEffect(() => {
+    if (selectedFolder) {
+      loadFolderFiles(selectedFolder);
+    } else {
+      setFolderFiles([]);
+    }
+  }, [selectedFolder]);
+
+  // Handle file upload
+  async function handleUpload(file, folder) {
+    if (!file) return;
     setUploading(true);
-    setMessage("Uploading file...");
 
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
+      const res = await fileService.uploadFile(file, folder);
+      showToast(res || `Uploaded ${file.name} successfully!`, "success");
 
-      const response = await fetch(
-        "http://localhost:8080/api/files/upload",
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
-
-      const result = await response.text();
-
-      if (!response.ok) {
-        throw new Error(result || "Upload failed");
+      if (folder) {
+        await loadFolderFiles(folder);
+      } else {
+        await loadFiles();
       }
-
-      setSelectedFile(null);
-      event.target.reset();
-
-      setMessage(result);
-      await loadFiles();
-    } catch (error) {
-      setMessage("Upload failed: " + error.message);
+    } catch (err) {
+      showToast(err.message || "Upload failed", "error");
     } finally {
       setUploading(false);
     }
   }
 
-  // Delete a file
-  async function handleDelete(file) {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${file}?`
-    );
-
+  // Handle main file delete
+  async function handleDeleteMainFile(file) {
+    const confirmed = window.confirm(`Are you sure you want to delete ${file}?`);
     if (!confirmed) return;
 
     try {
-      const response = await fetch(
-        `http://localhost:8080/api/files/${encodeURIComponent(file)}`,
-        { method: "DELETE" }
-      );
-
-      const result = await response.text();
-
-      if (!response.ok) {
-        throw new Error(result || "Delete failed");
-      }
-
-      setMessage(result);
+      const res = await fileService.deleteFile(file);
+      showToast(res || `Deleted ${file}`, "success");
       await loadFiles();
-    } catch (error) {
-      setMessage("Delete failed: " + error.message);
+    } catch (err) {
+      showToast("Delete failed: " + err.message, "error");
     }
   }
 
-  // Search files by filename
+  // Handle folder file delete
+  async function handleDeleteFolderFile(file, folder) {
+    const targetFolder = folder || selectedFolder;
+    const confirmed = window.confirm(
+      `Delete ${file} from ${targetFolder}?`
+    );
+    if (!confirmed) return;
 
-const filteredFiles = files
-  .filter((file) =>
-    file.toLowerCase().includes(searchTerm.toLowerCase())
-  )
-  .sort((a, b) => {
-    const result = a.localeCompare(b);
-    return sortOrder === "asc" ? result : -result;
+    try {
+      const res = await fileService.deleteFolderFile(targetFolder, file);
+      showToast(res || `Deleted ${file} from ${targetFolder}`, "success");
+      await loadFolderFiles(targetFolder);
+    } catch (err) {
+      showToast("Delete failed: " + err.message, "error");
+    }
+  }
+
+  // Handle create folder
+  async function handleCreateFolder(name) {
+    try {
+      const res = await fileService.createFolder(name);
+      showToast(res || `Folder ${name} created!`, "success");
+      await loadFolders();
+      setSelectedFolder(name);
+      await loadFolderFiles(name);
+    } catch (err) {
+      showToast("Create folder failed: " + err.message, "error");
+    }
+  }
+
+  // Handle move file
+  async function handleMoveFile(source, file, destination) {
+    try {
+      const res = await fileService.moveFile(source, file, destination);
+      showToast(res || `Moved ${file} to ${destination}!`, "success");
+      await loadFolderFiles(source);
+      if (selectedFolder === destination) {
+        await loadFolderFiles(destination);
+      }
+    } catch (err) {
+      showToast("Move failed: " + err.message, "error");
+    }
+  }
+
+  // Search filter for main files
+  const filteredMainFiles = files.filter((f) =>
+    f.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // Sorted folders
+  const sortedFolders = [...folders].sort((a, b) => {
+    return folderSortOrder === "asc"
+      ? a.localeCompare(b)
+      : b.localeCompare(a);
   });
 
+  // Dynamic page title following current view
+  const pageTitle = selectedFolder
+    ? `Folders / ${selectedFolder}`
+    : currentTab === "dashboard"
+    ? "Dashboard"
+    : currentTab === "myfiles"
+    ? "My files"
+    : currentTab === "activity"
+    ? "Activity & logs"
+    : currentTab === "trash"
+    ? "Trash"
+    : "Dashboard";
 
   return (
-    <main
-      style={{
-        maxWidth: "800px",
-        margin: "40px auto",
-        padding: "20px",
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <h1>🎬 FileFlix</h1>
-      <p>Your files. Anywhere. Anytime.</p>
-
-      <hr />
-
-      <h2>Upload Files</h2>
-
-      <form onSubmit={handleUpload}>
-        <input
-          type="file"
-          onChange={(event) => {
-            setSelectedFile(event.target.files[0] || null);
-          }}
-        />
-
-        <button
-          type="submit"
-          disabled={uploading || !selectedFile}
-          style={{
-            marginLeft: "10px",
-            padding: "8px 16px",
-            cursor: uploading ? "wait" : "pointer",
-          }}
-        >
-          {uploading ? "Uploading..." : "Upload File"}
-        </button>
-      </form>
-
-      {message && <p role="status">{message}</p>}
-
-      <hr />
-
-      <h2>My Files ({filteredFiles.length})</h2>
-
-      <input
-        type="text"
-        placeholder="Search your files..."
-        value={searchTerm}
-        onChange={(event) => setSearchTerm(event.target.value)}
-        style={{
-          padding: "10px",
-          width: "100%",
-          maxWidth: "400px",
-          marginBottom: "15px",
-          boxSizing: "border-box",
+    <div className="app-layout">
+      {/* 1. Left Sidebar */}
+      <FolderSidebar
+        folders={folders}
+        selectedFolder={selectedFolder}
+        onSelectFolder={(folder) => setSelectedFolder(folder)}
+        onOpenCreateFolder={() => setIsCreateFolderOpen(true)}
+        fileCount={files.length}
+        currentTab={currentTab}
+        onSelectTab={(tab) => {
+          setCurrentTab(tab);
+          if (tab === "dashboard" || tab === "myfiles") {
+            setSelectedFolder("");
+          }
         }}
+        searchTerm={searchTerm}
+        onSearchChange={setSearchTerm}
       />
 
-      {files.length === 0 && !message && (
-        <p>No files uploaded yet.</p>
-      )}
+      {/* 2. Main Viewport */}
+      <div className="app-main-view">
+        {/* Top Header - follows active page */}
+        <Header currentView={pageTitle} />
 
-      {files.length > 0 && filteredFiles.length === 0 && (
-        <p>No matching files found.</p>
-      )}
+        {/* Dashboard Split Content (2 Columns) */}
+        <div className="dashboard-content">
+          {/* Left Column: Upload Zone + Active Files */}
+          <div className="left-pane">
+            <UploadPanel
+              folders={folders}
+              selectedFolder={selectedFolder}
+              onSelectFolder={setSelectedFolder}
+              onUpload={handleUpload}
+              uploading={uploading}
+            />
 
-      
-<div style={{ marginBottom: "15px" }}>
-  <label htmlFor="sortOrder">Sort files: </label>
+            <FileList
+              files={filteredMainFiles}
+              fileDetails={fileDetails}
+              onDelete={handleDeleteMainFile}
+              onPreview={(file, url) => setPreviewingFile({ file, url })}
+              api={API}
+              title="Upload file"
+            />
+          </div>
 
-  <select
-    id="sortOrder"
-    value={sortOrder}
-    onChange={(event) => setSortOrder(event.target.value)}
-    style={{ padding: "8px", marginLeft: "8px" }}
-  >
-    <option value="asc">Name: A–Z</option>
-    <option value="desc">Name: Z–A</option>
-  </select>
-</div>
+          {/* Right Column: Folders Workspace Grid & Explorer */}
+          <div className="right-pane">
+            <div className="folder-section-header">
+              <div className="folder-title-block">
+                <h1>Your tidied up folder</h1>
+                <p>Edit your folders and files the way you want</p>
+              </div>
 
+              <div className="folder-actions-bar">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    loadFiles();
+                    loadFolders();
+                    if (selectedFolder) loadFolderFiles(selectedFolder);
+                    showToast("Workspace refreshed!");
+                  }}
+                  title="Refresh workspace"
+                >
+                  <span>🔄</span>
+                  <span>Refresh</span>
+                </button>
 
-      
-{filteredFiles.map((file) => {
-  const details = fileDetails.find((item) => item.name === file);
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() =>
+                    setFolderSortOrder((prev) => (prev === "asc" ? "desc" : "asc"))
+                  }
+                  title="Toggle sort order"
+                >
+                  <span>⇅</span>
+                  <span>Sort folder by {folderSortOrder.toUpperCase()}</span>
+                </button>
 
-  return (
-    <li key={file} style={{ marginBottom: "16px" }}>
-      📄{" "}
-      <a
-        href={`http://localhost:8080/api/files/preview/${encodeURIComponent(file)}`}
-        target="_blank"
-        rel="noreferrer"
-      >
-        {file}
-      </a>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => setIsCreateFolderOpen(true)}
+                >
+                  <span>+</span>
+                  <span>New Folder</span>
+                </button>
+              </div>
+            </div>
 
-      {details && (
-        <div style={{ marginLeft: "24px", color: "#666", fontSize: "13px" }}>
-          <div>Size: {formatFileSize(details.sizeBytes)}</div>
-          <div>
-            Last modified:{" "}
-            {new Date(details.lastModified).toLocaleString()}
+            {/* Folder Grid (Shows all folders) */}
+            <div className="folders-grid">
+              {sortedFolders.length === 0 ? (
+                <div
+                  style={{
+                    gridColumn: "1 / -1",
+                    padding: "36px",
+                    background: "var(--bg-card)",
+                    borderRadius: "var(--radius-lg)",
+                    border: "1px dashed var(--border-color)",
+                    textAlign: "center",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  <p style={{ fontSize: "15px", marginBottom: "8px", color: "var(--text-secondary)" }}>
+                    No folders created yet
+                  </p>
+                  <button
+                    className="btn-primary"
+                    style={{ marginTop: "10px" }}
+                    onClick={() => setIsCreateFolderOpen(true)}
+                  >
+                    + Create First Folder
+                  </button>
+                </div>
+              ) : (
+                sortedFolders.map((folder) => {
+                  const isSelected = selectedFolder === folder;
+
+                  return (
+                    <div
+                      key={folder}
+                      className={`folder-card ${isSelected ? "active-selected" : ""}`}
+                      onClick={() => {
+                        setSelectedFolder(isSelected ? "" : folder);
+                      }}
+                      title={`Click to open ${folder}`}
+                    >
+                      <div className="folder-3d-graphic">
+                        <FolderIcon3D size={84} />
+                      </div>
+
+                      <div className="folder-card-name">{folder}</div>
+                      <div className="folder-card-size">
+                        {isSelected ? "Opened" : "Folder"}
+                      </div>
+
+                      <div className="folder-card-divider"></div>
+
+                      <div className="folder-card-footer">
+                        <div className="footer-stat-row">
+                          <span>Total elements</span>
+                          <span>{isSelected ? `${folderFiles.length} assets` : "Assets"}</span>
+                        </div>
+                        <div className="footer-stat-row">
+                          <span>Organized by</span>
+                          <span>Name</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Selected Folder Explorer View */}
+            {selectedFolder && (
+              <div className="folder-contents-detail-card">
+                <div className="folder-detail-header">
+                  <div className="folder-detail-title-group">
+                    <button
+                      className="back-to-folders-btn"
+                      onClick={() => setSelectedFolder("")}
+                    >
+                      ← Back to all folders
+                    </button>
+                    <h2 style={{ fontSize: "16px", fontWeight: 700, margin: 0 }}>
+                      📁 {selectedFolder} ({folderFiles.length} files)
+                    </h2>
+                  </div>
+
+                  <button
+                    className="btn-secondary"
+                    onClick={() => {
+                      const input = document.createElement("input");
+                      input.type = "file";
+                      input.onchange = (e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleUpload(e.target.files[0], selectedFolder);
+                        }
+                      };
+                      input.click();
+                    }}
+                  >
+                    <span>↑</span>
+                    <span>Upload to {selectedFolder}</span>
+                  </button>
+                </div>
+
+                {folderFiles.length === 0 ? (
+                  <div style={{ padding: "30px", textAlign: "center", color: "var(--text-muted)" }}>
+                    <p style={{ marginBottom: "10px" }}>This folder is currently empty.</p>
+                    <p style={{ fontSize: "12px" }}>
+                      Upload files into <strong>{selectedFolder}</strong> using the left upload zone or the button above.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="folder-files-grid">
+                    {folderFiles.map((file) => {
+                      const previewUrl = fileService.getFolderFilePreviewUrl(
+                        selectedFolder,
+                        file
+                      );
+
+                      return (
+                        <FileItem
+                          key={file}
+                          file={file}
+                          folder={selectedFolder}
+                          previewUrl={previewUrl}
+                          folders={folders}
+                          onDelete={(f, fldr) => handleDeleteFolderFile(f, fldr)}
+                          onPreview={(f, url) => setPreviewingFile({ file: f, url })}
+                          onMove={(f, fldr) =>
+                            setMovingFile({ file: f, folder: fldr })
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
+      </div>
+
+      {/* 3. Create Folder Modal */}
+      <CreateFolder
+        isOpen={isCreateFolderOpen}
+        onClose={() => setIsCreateFolderOpen(false)}
+        onCreate={handleCreateFolder}
+      />
+
+      {/* 4. Move File Modal */}
+      <MoveFileModal
+        isOpen={!!movingFile}
+        onClose={() => setMovingFile(null)}
+        file={movingFile?.file}
+        currentFolder={movingFile?.folder}
+        folders={folders}
+        onMove={handleMoveFile}
+      />
+
+      {/* 5. In-App File Preview Modal */}
+      <FilePreview
+        file={previewingFile?.file}
+        previewUrl={previewingFile?.url}
+        onClose={() => setPreviewingFile(null)}
+      />
+
+      {/* 6. Toast Notification */}
+      {toast && (
+        <div
+          className={`app-toast ${toast.type === "error" ? "toast-error" : "toast-success"}`}
+        >
+          <span>{toast.type === "error" ? "⚠️" : "✓"}</span>
+          <span>{toast.message}</span>
+        </div>
       )}
-
-      <button
-        onClick={() => handleDelete(file)}
-        style={{ marginTop: "6px" }}
-      >
-        Delete
-      </button>
-    </li>
-  );
-})}
-
-    </main>
+    </div>
   );
 }
 
